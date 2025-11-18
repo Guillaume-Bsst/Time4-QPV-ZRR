@@ -282,6 +282,8 @@ st.set_page_config("ZRR & QPV par SIRET", layout="wide")
 
 st.title("🔍 Vérification ZRR & QPV")
 
+st.logo("image.png", size="large", link=None, icon_image=None)
+
 with st.sidebar:
     st.markdown("### ℹ️ À propos")
     st.write(
