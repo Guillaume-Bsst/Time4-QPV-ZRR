@@ -288,9 +288,9 @@ with st.sidebar:
         "Cet outil interroge l'API SIRENE et l'API Adresse, "
         "puis croise les résultats avec les zonages **ZRR** et **QPV**"
     )
-    st.write("1. Saisis un SIRET (avec ou sans espaces)")
-    st.write("2. Clique sur **Analyser**")
-    st.write("3. Lis les sections **Entreprise**, **ZRR**, **QPV**")
+    st.write("1. Saisir un SIRET (avec ou sans espaces)")
+    st.write("2. Cliquer sur **Analyser**")
+    st.write("3. Les sections **ZRR** et **QPV** indiquent si l'adresse associée au numéro SIRET se trouve dans une ZRR ou un QPV, avec une marge de 500m pour ce dernier")
 
 siret_input = st.text_input("SIRET de l'établissement", placeholder="123 456 789 00011")
 analyser = st.button("Analyser")
