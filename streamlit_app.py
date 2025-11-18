@@ -280,7 +280,7 @@ def siret_qpv_zrr_distance(siret: str) -> dict:
 
 st.set_page_config("ZRR & QPV par SIRET", layout="wide")
 
-st.title("🔍 Vérification ZRR & QPV à partir d’un SIRET")
+st.title("🔍 Vérification ZRR & QPV")
 
 with st.sidebar:
     st.markdown("### ℹ️ À propos")
@@ -335,18 +335,21 @@ if analyser:
                     st.write(f"**Code commune :** {code_commune}")
 
                 # ======= PARTIE 2 : ZRR =======
-                st.markdown("---")
                 st.markdown("## 🏔️ ZRR")
                 if in_zrr is True:
                     if zrr_label:
                         st.success(
-                            "✅ L'entreprise est située dans une **ZRR**.\n\n"
-                            f"**Commune ZRR :** {zrr_label}"
+                            "✅ L'entreprise est située dans une **ZRR**"
+                        )
+                        st.write(
+                        f"- **Commune ZRR :** {zrr_label}"
                         )
                     else:
                         st.success(
                             "✅ L'entreprise est située dans une **ZRR** "
-                            "(nom de la commune non disponible)."
+                        )
+                        st.write(
+                        "(nom de la commune non disponible)"
                         )
                 elif in_zrr is False:
                     st.error("❌ L'entreprise n'est pas située dans une ZRR.")
@@ -354,7 +357,6 @@ if analyser:
                     st.warning("⚠️ Impossible de déterminer si la commune est en ZRR.")
 
                 # ======= PARTIE 3 : QPV =======
-                st.markdown("---")
                 st.markdown("## 🏙️ QPV")
 
                 if msg:
