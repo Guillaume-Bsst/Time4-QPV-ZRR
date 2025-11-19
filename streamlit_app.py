@@ -174,7 +174,7 @@ def siret_qpv_zrr_distance(siret: str) -> dict:
       - zrr_label (nom de la commune ZRR)
       - est_dans_qpv (True/False/None)
       - distance_km (float ou None)
-      - a_moins_500m_qpv (bool ou None)
+      - a_moins_1km_qpv (bool ou None)
       - qpv_dans_lesquels (liste)
       - qpv_plus_proche (dict)
       - message (erreur éventuelle)
@@ -214,7 +214,7 @@ def siret_qpv_zrr_distance(siret: str) -> dict:
             "zrr_label": zrr_label,
             "est_dans_qpv": None,
             "distance_km": None,
-            "a_moins_500m_qpv": None,
+            "a_moins_1km_qpv": None,
             "qpv_dans_lesquels": [],
             "qpv_plus_proche": None,
             "message": "Impossible de géocoder l'adresse.",
@@ -247,7 +247,7 @@ def siret_qpv_zrr_distance(siret: str) -> dict:
     distances_m = qpv_gdf.geometry.distance(pt_proj)
     min_dist_m = float(distances_m.min())
     distance_km = min_dist_m / 1000.0
-    a_moins_500m_qpv = distance_km <= 0.5
+    a_moins_1km_qpv = distance_km <= 1
 
     # QPV le plus proche
     idx_min = distances_m.idxmin()
@@ -269,7 +269,7 @@ def siret_qpv_zrr_distance(siret: str) -> dict:
         "zrr_label": zrr_label,
         "est_dans_qpv": est_dans_qpv,
         "distance_km": distance_km,
-        "a_moins_500m_qpv": a_moins_500m_qpv,
+        "a_moins_1km_qpv": a_moins_1km_qpv,
         "qpv_dans_lesquels": qpv_dans_lesquels,
         "qpv_plus_proche": qpv_plus_proche,
         "message": None,
@@ -292,7 +292,7 @@ with st.sidebar:
     )
     st.write("1. Saisir un SIRET (avec ou sans espaces)")
     st.write("2. Cliquer sur **Analyser**")
-    st.write("3. Les sections **ZRR** et **QPV** indiquent si l'adresse associée au numéro SIRET se trouve dans une ZRR ou un QPV, avec une marge de 500m pour ce dernier")
+    st.write("3. Les sections **ZRR** et **QPV** indiquent si l'adresse associée au numéro SIRET se trouve dans une ZRR ou un QPV, avec une marge de 1km pour ce dernier")
 
 siret_input = st.text_input("SIRET de l'établissement", placeholder="123 456 789 00011")
 analyser = st.button("Analyser")
@@ -321,7 +321,7 @@ if analyser:
                 zrr_label = res.get("zrr_label")
                 est_dans_qpv = res.get("est_dans_qpv")
                 distance_km = res.get("distance_km")
-                a_moins_500m = res.get("a_moins_500m_qpv")
+                a_moins_1km = res.get("a_moins_1km_qpv")
                 qpv_inside = res.get("qpv_dans_lesquels", [])
                 qpv_plus_proche = res.get("qpv_plus_proche")
                 msg = res.get("message")
@@ -365,13 +365,13 @@ if analyser:
                     st.info(msg)
 
                 if distance_km is not None:
-                    if a_moins_500m:
+                    if a_moins_1km:
                         st.success(
-                            f"✅ L'entreprise est à **moins de 500m** d'un QPV "
+                            f"✅ L'entreprise est à **moins de 1km** d'un QPV "
                         )
                     else:
                         st.info(
-                            f"❌ L'entreprise est à **plus de 500m** de tout QPV "
+                            f"❌ L'entreprise est à **plus de 1km** de tout QPV "
                         )
                 else:
                     st.warning(
