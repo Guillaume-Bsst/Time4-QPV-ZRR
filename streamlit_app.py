@@ -8,57 +8,38 @@ import streamlit as st
 
 # ================== CONFIG ==================
 
-# ⚠ Tu peux garder ta clé ici pour des tests locaux,
-#   mais en prod je te conseille de passer par st.secrets (cf. plus bas).
 API_KEY_SIRENE = "baec8347-d5ad-4056-ac83-47d5ad10565e"
 
 SIRENE_URL = "https://api.insee.fr/api-sirene/3.11/siret/{}"
-BAN_URL = "https://api-adresse.data.gouv.fr/search/"
+BAN_SEARCH_URL = "https://api-adresse.data.gouv.fr/search/"
 
 QPV_GEO_PATH = "QP2024_France_Hexagonale_Outre_Mer_WGS84.gpkg"
 ZRR_CSV_PATH = "ZRR_list_source.csv"
 
-# Colonnes QPV
 COL_CODE_QP = "code_qp"
 COL_LIB_QP = "lib_qp"
 COL_LIB_COM = "lib_com"
-
-# Colonne libellé ZRR (nom de la commune)
 ZRR_LIB_COL = "LIBGEO"
 
-# ================== CHARGEMENT DONNÉES (avec cache) ==================
-
+# ================== CHARGEMENT DONNÉES ==================
 
 @st.cache_resource
 def load_qpv_polygones(path: str) -> gpd.GeoDataFrame:
-    """
-    Charge le fichier QPV et le projette en Lambert-93 (EPSG:2154)
-    pour calculer des distances en mètres.
-    """
+    if not os.path.exists(path):
+        return gpd.GeoDataFrame()
     gdf = gpd.read_file(path)
-
     if gdf.crs is None:
-        raise ValueError("Le fichier QPV n'a pas de système de coordonnées (CRS).")
-
-    # On travaille en Lambert-93 pour la France (mètres)
+        raise ValueError("Le fichier QPV n'a pas de CRS.")
     if gdf.crs.to_epsg() != 2154:
         gdf = gdf.to_crs(epsg=2154)
-
     return gdf
-
 
 @st.cache_resource
 def load_zrr_data(path: str):
-    """
-    Charge le CSV ZRR (avec header=5 comme dans ton code)
-    et renvoie :
-      - df_zrr nettoyé
-      - l'ensemble des communes ZRR (totales ou partielles)
-    """
+    if not os.path.exists(path):
+        return pd.DataFrame(), set()
     df_zrr = pd.read_csv(path, header=5)
-    # Normalisation du code commune
     df_zrr["CODGEO"] = df_zrr["CODGEO"].astype(str).str.zfill(5)
-
     communes_zrr = set(
         df_zrr.loc[
             df_zrr["ZRR_SIMP"].str.startswith(("C", "P"), na=False),
@@ -67,167 +48,14 @@ def load_zrr_data(path: str):
     )
     return df_zrr, communes_zrr
 
-
 # ================== FONCTIONS METIER ==================
 
-
-def get_sirene_etab(siret: str) -> dict:
-    """Interroge l'API SIRENE 3.11 et renvoie l'objet 'etablissement'."""
-    headers = {"X-INSEE-Api-Key-Integration": API_KEY_SIRENE}
-    url = SIRENE_URL.format(siret)
-    r = requests.get(url, headers=headers, timeout=10)
-    if r.status_code != 200:
-        raise RuntimeError(f"Erreur API SIRENE ({r.status_code}) : {r.text}")
-    data = r.json()
-    etab = data.get("etablissement")
-    if etab is None:
-        raise ValueError("Réponse SIRENE invalide : pas de champ 'etablissement'.")
-    return etab
-
-
-def adresse_depuis_sirene(etab: dict):
-    """Construit adresse texte + CP + commune à partir de l'établissement SIRENE."""
-    adr = etab.get("adresseEtablissement", {})
-
-    numero = adr.get("numeroVoieEtablissement") or ""
-    type_voie = adr.get("typeVoieEtablissement") or ""
-    lib_voie = adr.get("libelleVoieEtablissement") or ""
-    comp = adr.get("complementAdresseEtablissement") or ""
-
-    code_postal = adr.get("codePostalEtablissement") or ""
-    commune = adr.get("libelleCommuneEtablissement") or ""
-
-    ligne1 = " ".join(x for x in [str(numero), type_voie, lib_voie] if x).strip()
-    if comp:
-        ligne1 = f"{ligne1}, {comp}"
-
-    adresse_full = " ".join([ligne1, code_postal, commune]).strip()
-    return adresse_full, code_postal, commune
-
-
-def infos_entreprise_depuis_sirene(etab: dict):
-    """
-    Essaie d'extraire :
-      - nom de l'entreprise
-      - nom du dirigeant (si personne physique)
-    à partir de l'objet 'etablissement' (et uniteLegale) SIRENE 3.11.
-    """
-    ul = etab.get("uniteLegale", {}) or {}
-
-    nom_entreprise = (
-        etab.get("denominationUsuelleEtablissement")
-        or ul.get("denominationUsuelle1UniteLegale")
-        or ul.get("denominationUniteLegale")
-        or ul.get("nomUniteLegale")
-    )
-
-    nom_dirigeant = None
-    nom = ul.get("nomUniteLegale")
-    prenom = ul.get("prenomUsuelUniteLegale") or ul.get("prenom1UniteLegale")
-    if nom and prenom:
-        nom_dirigeant = f"{prenom} {nom}"
-
-    return nom_entreprise, nom_dirigeant
-
-
-def geocoder_ban(adresse: str, cp: str, commune: str):
-    """Géocode via BAN. Renvoie un Point (WGS84) ou None."""
-    params = {"q": adresse, "limit": 1}
-    if cp:
-        params["postcode"] = cp
-    if commune:
-        params["city"] = commune
-
-    r = requests.get(BAN_URL, params=params, timeout=10)
-    if r.status_code != 200:
+def calcul_proximite_qpv(pt_wgs: Point, qpv_gdf: gpd.GeoDataFrame):
+    if pt_wgs is None or qpv_gdf.empty:
         return None
 
-    data = r.json()
-    feats = data.get("features", [])
-    if not feats:
-        return None
+    pt_proj = gpd.GeoSeries([pt_wgs], crs="EPSG:4326").to_crs(qpv_gdf.crs).iloc[0]
 
-    lon, lat = feats[0]["geometry"]["coordinates"]
-    return Point(lon, lat)
-
-
-def commune_est_en_zrr(code_commune: str, communes_zrr: set):
-    """
-    True  -> commune totalement ou partiellement ZRR
-    False -> commune non ZRR
-    None  -> code commune inconnu
-    """
-    if not code_commune:
-        return None
-    return code_commune in communes_zrr
-
-
-def siret_qpv_zrr_distance(siret: str) -> dict:
-    """
-    Retourne un dict avec :
-      - siret
-      - nom_entreprise
-      - nom_dirigeant
-      - adresse
-      - code_commune
-      - in_zrr (True/False/None)
-      - zrr_label (nom de la commune ZRR)
-      - est_dans_qpv (True/False/None)
-      - distance_km (float ou None)
-      - a_moins_1km_qpv (bool ou None)
-      - qpv_dans_lesquels (liste)
-      - qpv_plus_proche (dict)
-      - message (erreur éventuelle)
-    """
-    # Charge les données (avec cache Streamlit)
-    qpv_gdf = load_qpv_polygones(QPV_GEO_PATH)
-    df_zrr, communes_zrr = load_zrr_data(ZRR_CSV_PATH)
-
-    etab = get_sirene_etab(siret)
-    adresse, cp, commune = adresse_depuis_sirene(etab)
-    nom_entreprise, nom_dirigeant = infos_entreprise_depuis_sirene(etab)
-
-    # ---- ZRR via code commune SIRENE ----
-    code_commune = etab.get("adresseEtablissement", {}).get(
-        "codeCommuneEtablissement"
-    )
-    if code_commune:
-        code_commune = str(code_commune).zfill(5)
-    in_zrr = commune_est_en_zrr(code_commune, communes_zrr)
-
-    zrr_label = None    # nom de la commune ZRR
-    if in_zrr and code_commune:
-        row_zrr = df_zrr.loc[df_zrr["CODGEO"] == code_commune]
-        if not row_zrr.empty:
-            zrr_label = row_zrr.iloc[0].get(ZRR_LIB_COL)
-
-    # ---- Géocodage pour QPV ----
-    pt_wgs = geocoder_ban(adresse, cp, commune)
-    if pt_wgs is None:
-        return {
-            "siret": siret,
-            "nom_entreprise": nom_entreprise,
-            "nom_dirigeant": nom_dirigeant,
-            "adresse": adresse,
-            "code_commune": code_commune,
-            "in_zrr": in_zrr,
-            "zrr_label": zrr_label,
-            "est_dans_qpv": None,
-            "distance_km": None,
-            "a_moins_1km_qpv": None,
-            "qpv_dans_lesquels": [],
-            "qpv_plus_proche": None,
-            "message": "Impossible de géocoder l'adresse.",
-        }
-
-    # Reprojeter le point en Lambert-93 (EPSG:2154) comme les QPV
-    pt_proj = (
-        gpd.GeoSeries([pt_wgs], crs="EPSG:4326")
-        .to_crs(qpv_gdf.crs)
-        .iloc[0]
-    )
-
-    # ---- 1. Est-ce que le point est DANS un QPV ? ----
     mask_inside = qpv_gdf.contains(pt_proj)
     qpv_inside = qpv_gdf[mask_inside]
     est_dans_qpv = not qpv_inside.empty
@@ -235,21 +63,17 @@ def siret_qpv_zrr_distance(siret: str) -> dict:
     qpv_dans_lesquels = []
     if est_dans_qpv:
         for _, row in qpv_inside.iterrows():
-            qpv_dans_lesquels.append(
-                {
-                    "code_qp": row.get(COL_CODE_QP),
-                    "lib_qp": row.get(COL_LIB_QP),
-                    "commune_qp": row.get(COL_LIB_COM),
-                }
-            )
+            qpv_dans_lesquels.append({
+                "code_qp": row.get(COL_CODE_QP),
+                "lib_qp": row.get(COL_LIB_QP),
+                "commune_qp": row.get(COL_LIB_COM),
+            })
 
-    # ---- 2. Distance minimale à n'importe quel QPV ----
     distances_m = qpv_gdf.geometry.distance(pt_proj)
     min_dist_m = float(distances_m.min())
     distance_km = min_dist_m / 1000.0
     a_moins_1km_qpv = distance_km <= 1
 
-    # QPV le plus proche
     idx_min = distances_m.idxmin()
     row_min = qpv_gdf.loc[idx_min]
     qpv_plus_proche = {
@@ -260,129 +84,212 @@ def siret_qpv_zrr_distance(siret: str) -> dict:
     }
 
     return {
-        "siret": siret,
-        "nom_entreprise": nom_entreprise,
-        "nom_dirigeant": nom_dirigeant,
-        "adresse": adresse,
-        "code_commune": code_commune,
-        "in_zrr": in_zrr,
-        "zrr_label": zrr_label,
         "est_dans_qpv": est_dans_qpv,
         "distance_km": distance_km,
         "a_moins_1km_qpv": a_moins_1km_qpv,
         "qpv_dans_lesquels": qpv_dans_lesquels,
         "qpv_plus_proche": qpv_plus_proche,
-        "message": None,
+    }
+
+def check_zrr_statut(code_commune: str, df_zrr: pd.DataFrame, communes_zrr: set):
+    if not code_commune:
+        return None, None
+    code_commune = str(code_commune).zfill(5)
+    is_zrr = code_commune in communes_zrr
+    zrr_label = None
+    if is_zrr:
+        row_zrr = df_zrr.loc[df_zrr["CODGEO"] == code_commune]
+        if not row_zrr.empty:
+            zrr_label = row_zrr.iloc[0].get(ZRR_LIB_COL)
+    return is_zrr, zrr_label
+
+# --- SIRET ---
+
+def get_sirene_etab(siret: str) -> dict:
+    headers = {"X-INSEE-Api-Key-Integration": API_KEY_SIRENE}
+    r = requests.get(SIRENE_URL.format(siret), headers=headers, timeout=10)
+    if r.status_code != 200:
+        raise RuntimeError(f"Erreur API SIRENE ({r.status_code})")
+    data = r.json()
+    return data.get("etablissement")
+
+def analyse_depuis_siret(siret: str):
+    qpv_gdf = load_qpv_polygones(QPV_GEO_PATH)
+    df_zrr, communes_zrr = load_zrr_data(ZRR_CSV_PATH)
+    etab = get_sirene_etab(siret)
+    
+    # Adresse Sirene
+    adr = etab.get("adresseEtablissement", {})
+    numero = adr.get("numeroVoieEtablissement") or ""
+    type_voie = adr.get("typeVoieEtablissement") or ""
+    lib_voie = adr.get("libelleVoieEtablissement") or ""
+    code_postal = adr.get("codePostalEtablissement") or ""
+    commune_nom = adr.get("libelleCommuneEtablissement") or ""
+    
+    adresse_full = f"{numero} {type_voie} {lib_voie}, {code_postal} {commune_nom}".strip()
+    
+    # Infos entreprise
+    ul = etab.get("uniteLegale", {}) or {}
+    nom_ent = ul.get("denominationUniteLegale") or etab.get("denominationUsuelleEtablissement")
+    
+    # Code commune
+    code_commune = adr.get("codeCommuneEtablissement")
+    in_zrr, zrr_label = check_zrr_statut(code_commune, df_zrr, communes_zrr)
+
+    # Géocodage BAN
+    pt_wgs = None
+    r_ban = requests.get(BAN_SEARCH_URL, params={"q": adresse_full, "limit": 1})
+    if r_ban.status_code == 200:
+        d_ban = r_ban.json()
+        if d_ban.get("features"):
+            lon, lat = d_ban["features"][0]["geometry"]["coordinates"]
+            pt_wgs = Point(lon, lat)
+
+    res_qpv = calcul_proximite_qpv(pt_wgs, qpv_gdf)
+
+    return {
+        "type": "siret",
+        "nom_entreprise": nom_ent,
+        "adresse": adresse_full,
+        "code_commune": code_commune,
+        "in_zrr": in_zrr,
+        "zrr_label": zrr_label,
+        "qpv_data": res_qpv
+    }
+
+# --- ADRESSE DIRECTE ---
+
+def analyse_depuis_adresse_raw(adresse_saisie: str):
+    qpv_gdf = load_qpv_polygones(QPV_GEO_PATH)
+    df_zrr, communes_zrr = load_zrr_data(ZRR_CSV_PATH)
+
+    r = requests.get(BAN_SEARCH_URL, params={"q": adresse_saisie, "limit": 1}, timeout=10)
+    if r.status_code != 200:
+        raise RuntimeError("Erreur API Adresse")
+    
+    data = r.json()
+    if not data.get("features"):
+        raise ValueError("Adresse non trouvée.")
+
+    feat = data["features"][0]
+    props = feat.get("properties", {})
+    geom = feat.get("geometry", {})
+    
+    label_adresse = props.get("label")
+    code_commune = props.get("citycode") # Code INSEE
+    lon, lat = geom.get("coordinates")
+    pt_wgs = Point(lon, lat)
+
+    in_zrr, zrr_label = check_zrr_statut(code_commune, df_zrr, communes_zrr)
+    res_qpv = calcul_proximite_qpv(pt_wgs, qpv_gdf)
+
+    return {
+        "type": "adresse",
+        "adresse_trouvee": label_adresse,
+        "code_commune": code_commune,
+        "in_zrr": in_zrr,
+        "zrr_label": zrr_label,
+        "qpv_data": res_qpv
     }
 
 
 # ================== UI STREAMLIT ==================
 
-st.set_page_config("ZRR & QPV par SIRET", layout="wide")
-
+st.set_page_config("ZRR & QPV Checker", layout="wide")
 st.title("🔍 Vérification ZRR & QPV")
 
+# --> TON LOGO ICI <--
 st.logo("image.png", size="large", link=None, icon_image=None)
 
 with st.sidebar:
     st.markdown("### ℹ️ À propos")
-    st.write(
-        "Cet outil interroge l'API SIRENE et l'API Adresse, "
-        "puis croise les résultats avec les zonages **ZRR** et **QPV**"
-    )
-    st.write("1. Saisir un SIRET (avec ou sans espaces)")
-    st.write("2. Cliquer sur **Analyser**")
-    st.write("3. Les sections **ZRR** et **QPV** indiquent si l'adresse associée au numéro SIRET se trouve dans une ZRR ou un QPV, avec une marge de 1km pour ce dernier")
+    st.write("Cet outil permet de vérifier l'éligibilité ZRR et QPV (1km) soit par SIRET, soit directement par Adresse.")
+    st.write("Si le géocodage échoue pour le QPV ou que le ZRR est indéterminé, dans la grande majorité des cas c'est que l'adresse n'est ni dans un QPV, ni dans un ZRR. ")
 
-siret_input = st.text_input("SIRET de l'établissement", placeholder="123 456 789 00011")
-analyser = st.button("Analyser")
+# --- FORMULAIRES ---
 
-if analyser:
-    # nettoyage du SIRET : on garde uniquement les chiffres
-    siret_clean = "".join(c for c in siret_input if c.isdigit())
+col_input, col_res = st.columns([1, 1.5])
 
-    if len(siret_clean) != 14:
-        st.error(
-            "Le SIRET doit contenir **14 chiffres** "
-            "(tu peux mettre des espaces ou tirets, ils seront ignorés)"
-        )
-    else:
-        with st.spinner("Analyse en cours..."):
-            try:
-                res = siret_qpv_zrr_distance(siret_clean)
-            except Exception as e:
-                st.error(f"Erreur lors de l'analyse : {e}")
+with col_input:
+    st.markdown("### Option 1 : Par SIRET")
+    siret_input = st.text_input("Numéro SIRET (14 chiffres)", placeholder="123 456 789 00011")
+    btn_siret = st.button("Analyser ce SIRET")
+
+    st.markdown("---") # Séparateur visuel
+
+    st.markdown("### Option 2 : Par Adresse")
+    adresse_input = st.text_input("Adresse complète", placeholder="10 rue de la Paix, 75000 Paris")
+    btn_adresse = st.button("Analyser cette adresse")
+
+# --- ANALYSE & AFFICHAGE ---
+
+res = None
+error_msg = None
+
+if btn_siret and siret_input:
+    with st.spinner("Analyse du SIRET..."):
+        try:
+            siret_clean = "".join(c for c in siret_input if c.isdigit())
+            res = analyse_depuis_siret(siret_clean)
+        except Exception as e:
+            error_msg = str(e)
+
+if btn_adresse and adresse_input:
+    with st.spinner("Analyse de l'adresse..."):
+        try:
+            res = analyse_depuis_adresse_raw(adresse_input)
+        except Exception as e:
+            error_msg = str(e)
+
+# --- RESULTATS ---
+
+with col_res:
+    if error_msg:
+        st.error(f"Erreur : {error_msg}")
+
+    if res:
+        st.markdown("## 📊 Résultats")
+        
+        # Bloc Localisation
+        with st.container(border=True):
+            st.caption("Localisation identifiée")
+            if res["type"] == "siret":
+                st.write(f"🏢 **{res.get('nom_entreprise')}**")
+                st.write(f"📍 {res.get('adresse')}")
             else:
-                nom_entreprise = res.get("nom_entreprise")
-                nom_dirigeant = res.get("nom_dirigeant")
-                adresse = res.get("adresse", "(adresse indisponible)")
-                code_commune = res.get("code_commune")
-                in_zrr = res.get("in_zrr")
-                zrr_label = res.get("zrr_label")
-                est_dans_qpv = res.get("est_dans_qpv")
-                distance_km = res.get("distance_km")
-                a_moins_1km = res.get("a_moins_1km_qpv")
-                qpv_inside = res.get("qpv_dans_lesquels", [])
-                qpv_plus_proche = res.get("qpv_plus_proche")
-                msg = res.get("message")
+                st.write(f"🏠 **Adresse normalisée :**")
+                st.write(f"📍 {res.get('adresse_trouvee')}")
+            st.write(f"🔢 Code INSEE : `{res.get('code_commune')}`")
 
-                # ======= PARTIE 1 : ENTREPRISE =======
-                st.markdown("## 🏢 Entreprise")
-                st.write(f"**Nom :** {nom_entreprise or 'Non disponible'}")
-                st.write(f"**SIRET :** {siret_clean}")
-                st.write(f"**Adresse :** {adresse}")
-                if nom_dirigeant:
-                    st.write(f"**Dirigeant :** {nom_dirigeant}")
-                if code_commune:
-                    st.write(f"**Code commune :** {code_commune}")
+        # Bloc ZRR
+        in_zrr = res.get("in_zrr")
+        zrr_nom = res.get("zrr_label")
+        
+        if in_zrr:
+            st.success(f"✅ **ZRR : OUI** (Commune : {zrr_nom})")
+        elif in_zrr is False:
+            st.error("❌ **ZRR : NON**")
+        else:
+            st.warning("⚠️ **ZRR : Indéterminé**")
 
-                # ======= PARTIE 2 : ZRR =======
-                st.markdown("## 🏔️ ZRR")
-                if in_zrr is True:
-                    if zrr_label:
-                        st.success(
-                            "✅ L'entreprise est située dans une **ZRR**"
-                        )
-                        st.write(
-                        f"- **Commune ZRR :** {zrr_label}"
-                        )
-                    else:
-                        st.success(
-                            "✅ L'entreprise est située dans une **ZRR** "
-                        )
-                        st.write(
-                        "(nom de la commune non disponible)"
-                        )
-                elif in_zrr is False:
-                    st.error("❌ L'entreprise n'est pas située dans une ZRR.")
-                else:
-                    st.warning("⚠️ Impossible de déterminer si la commune est en ZRR.")
-
-                # ======= PARTIE 3 : QPV =======
-                st.markdown("## 🏙️ QPV")
-
-                if msg:
-                    st.info(msg)
-
-                if distance_km is not None:
-                    if a_moins_1km:
-                        st.success(
-                            f"✅ L'entreprise est à **moins de 1km** d'un QPV "
-                        )
-                    else:
-                        st.info(
-                            f"❌ L'entreprise est à **plus de 1km** de tout QPV "
-                        )
-                else:
-                    st.warning(
-                        "⚠️ Distance aux QPV non calculée (problème de géocodage)"
-                    )
-
-                if qpv_plus_proche is not None:
-                    st.write(
-                        f"- **QPV le plus proche :** {qpv_plus_proche['lib_qp']} "
-                        f"({qpv_plus_proche['commune_qp']})"
-                    )
-                    st.write(
-                        f"- **Distance :** {qpv_plus_proche['distance_km']:.3f} km"
-                    )
+        # Bloc QPV
+        qpv = res.get("qpv_data")
+        if qpv:
+            dist = qpv["distance_km"]
+            is_close = qpv["a_moins_1km_qpv"]
+            
+            if is_close:
+                st.success(f"✅ **Proximité QPV : OUI** (< 1km)")
+            else:
+                st.info(f"❌ **Proximité QPV : NON** (> 1km)")
+            
+            st.write(f"📏 Distance : **{dist:.3f} km**")
+            
+            if qpv["qpv_plus_proche"]:
+                qp = qpv["qpv_plus_proche"]
+                st.caption(f"QPV le plus proche : {qp['lib_qp']} ({qp['commune_qp']})")
+            
+            if qpv["est_dans_qpv"]:
+                st.warning("🚨 L'adresse est située **DANS** le périmètre QPV.")
+        else:
+            st.warning("⚠️ Impossible de calculer la distance QPV (géocodage échoué).")
